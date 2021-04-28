@@ -1,3 +1,5 @@
+pub mod xml;
+
 #[cfg(test)]
 mod tests {
     #[test]
