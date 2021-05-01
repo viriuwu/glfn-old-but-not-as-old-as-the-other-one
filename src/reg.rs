@@ -2,7 +2,7 @@
 
 use crate::{Api, Platform, types, xml};
 use roxmltree::{Document, Node};
-use std::{collections::HashMap, convert::TryFrom};
+use std::{borrow::Cow::{self, Borrowed as B}, collections::HashMap, convert::TryFrom};
 
 fn s(s: &str) -> String {
     s.into()
@@ -10,6 +10,7 @@ fn s(s: &str) -> String {
 
 #[derive(Debug)]
 pub enum Error {
+    Duplicate(String),
     InvalidAttribute(String, String, String),
     MissingAttribute(String, String),
     UnknownAttribute(String, String),
@@ -21,13 +22,14 @@ pub struct Registry {
 
 }
 
-pub enum EnumVariant {
-    /// `GLint`. Not actually standardized, but like two constants use negative values.
-    Int32(i32),
-    /// `GLenum`/`GLuint`, the default usually and also when `type="u"` is specified.
-    Uint32(u32),
-    /// `GLuint64`, when `type="ull"` is specified.
-    Uint64(u64),
+pub struct EnumVariant {
+    ty: Cow<'static, str>,
+    value: EnumValue,
+}
+
+pub enum EnumValue {
+    Signed(i64),
+    Unsigned(u64),
 }
 
 impl Registry {
@@ -55,6 +57,13 @@ impl Registry {
             }
         }
 
+        for (k, v) in &enums {
+            println!("pub const {}: {} = {};", k, v.ty, match v.value {
+                EnumValue::Signed(x) => x.to_string(),
+                EnumValue::Unsigned(x) => format!("0x{:X}", x),
+            });
+        }
+
         todo!()
     }
 }
@@ -67,6 +76,7 @@ fn parse_enum(
     for child in el.children().filter(Node::is_element) {
         match child.tag_name().name() {
             "enum" => {
+                // If it's tagged as being specific to another API, skip
                 if let Some(api_attr) = child.attribute("api") {
                     match Api::try_from(api_attr) {
                         Ok(api) => if api != requested_api { continue },
@@ -79,22 +89,56 @@ fn parse_enum(
                 let name = child.attribute("name")
                     .ok_or_else(|| Error::MissingAttribute(s("enum"), s("name")))?;
                 if !out.contains_key(name) {
-                    let value = child.attribute("value").unwrap();
+                    let value = child.attribute("value")
+                        .ok_or_else(|| Error::MissingAttribute(s("enum"), s("value")))?;
+
+                    // TODO: When it's EGL time, handle `EGL_CAST(EGLint, -1)` etc...
+
                     let (literal, radix) = match value {
                         x if x.starts_with("0x") => (&value[2..], 16),
                         x if x.len() > 1 && x.starts_with('0') => (&value[1..], 8),
                         _ => (value, 10),
                     };
-                    let variant = match child.attribute("type") {
-                        None if literal.starts_with('-') => i32::from_str_radix(literal, radix).map(EnumVariant::Int32),
-                        Some("ull") => u64::from_str_radix(literal, radix).map(EnumVariant::Uint64),
-                        Some("u") | None => u32::from_str_radix(literal, radix).map(EnumVariant::Uint32),
-                        Some(unknown) => return Err(Error::InvalidAttribute(s("enum"), s("type"), unknown.into())),
-                    }.map_err(|_| Error::InvalidAttribute(s("enum"), s("value"), value.into()))?;
+                    let (ty, val) = match child.attribute("type") {
+                        Some("ull") => (
+                            B("GLuint64"),
+                            u64::from_str_radix(literal, radix)
+                                .map(EnumValue::Unsigned)
+                        ),
+                        Some("u") => (
+                            B("GLuint32"),
+                            u32::from_str_radix(literal, radix)
+                                .map(u64::from)
+                                .map(EnumValue::Unsigned),
+                        ),
+                        None if value.starts_with('-') => (
+                            // This is probably fine?
+                            // Only 1 obscure extension uses negative literals (without a type).
+                            B("GLint"),
+                            i32::from_str_radix(literal, radix)
+                                .map(i64::from)
+                                .map(EnumValue::Signed)
+                        ),
+                        None => (
+                            B("GLenum"),
+                            u32::from_str_radix(literal, radix)
+                                .map(u64::from)
+                                .map(EnumValue::Unsigned),
+                        ),
+                        Some(unknown) => return Err(
+                            Error::InvalidAttribute(s("enum"), s("type"), unknown.into())
+                        ),
+                    };
 
-                    out.insert(name.into(), variant);
+                    out.insert(
+                        name.into(),
+                        EnumVariant {
+                            ty,
+                            value: val.map_err(|_| Error::InvalidAttribute(s("enum"), s("value"), value.into()))?,
+                        },
+                    );
                 } else {
-                    // todo!("redefinition of {}", name);
+                    return Err(Error::Duplicate(s(name)))
                 }
             },
             "unused" => (),
