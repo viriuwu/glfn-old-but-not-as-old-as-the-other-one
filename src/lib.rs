@@ -1,5 +1,11 @@
 pub mod xml;
 
+pub enum Platform {
+    Windows,
+    Linux,
+    Mac,
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
