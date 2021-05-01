@@ -1,4 +1,4 @@
-mod gl;
+pub mod gl;
 
 use std::borrow::Cow;
 
